@@ -1,7 +1,7 @@
 # TransitionZero · Claude Analytics
 
 A private dashboard of Claude usage across the organisation, hosted on GitHub Pages
-at `https://annan-code.github.io/tzcl-analytics/`.
+at `https://transition-zero.github.io/tzcl-analytics/`.
 
 ## Files
 
