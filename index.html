@@ -208,6 +208,38 @@ tbody tr.none td{opacity:.55}
   color:var(--cowork);border:1px solid currentColor;letter-spacing:.05em}
 .foot{font-size:.74rem;color:var(--faint);text-align:center;margin-top:26px;padding-top:18px;
   border-top:1px solid var(--line);line-height:1.75}
+.foot a{color:var(--faint);text-decoration:underline}
+
+/* ── refresh panel ─────────────────────────────────────── */
+.rf-step{display:flex;gap:16px;align-items:flex-start;padding:16px 0;border-bottom:1px solid var(--line)}
+.rf-step:last-child{border-bottom:none}
+.rf-n{width:28px;height:28px;border-radius:50%;background:var(--ink);color:var(--surface);
+  display:flex;align-items:center;justify-content:center;font-size:.8rem;font-weight:700;flex-shrink:0}
+.rf-b{flex:1;font-size:.88rem;line-height:1.65}
+.rf-b p{margin:0 0 8px;color:var(--muted)}
+.rf-b b{color:var(--ink);font-weight:500}
+.rf-drop{border:2px dashed var(--line);border-radius:6px;padding:26px;text-align:center;
+  color:var(--muted);font-size:.85rem;margin-top:8px;cursor:pointer;background:var(--surface2)}
+.rf-drop.over{border-color:var(--link);color:var(--ink)}
+.rf-drop input{display:none}
+.rf-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:10px}
+.rf-form label{display:block;font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px}
+.rf-form input,.rf-form select{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:4px;
+  background:var(--surface);color:var(--ink);font-size:.9rem;font-family:inherit;outline:none}
+.rf-form input:focus,.rf-form select:focus{border-color:var(--link)}
+.rf-person{grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;padding:12px;
+  background:var(--surface2);border-radius:4px}
+.rf-person .who{grid-column:1/-1;font-size:.82rem;color:var(--ink)}
+.rf-btn{padding:11px 24px;border:none;border-radius:100px;background:var(--ink);color:var(--surface);
+  font-size:.88rem;font-weight:500;cursor:pointer;font-family:inherit;margin-top:14px}
+.rf-btn:disabled{opacity:.45;cursor:default}
+.rf-btn.amber{background:var(--amber);color:#3d2a00;font-weight:700}
+.rf-ok{color:var(--ok)}.rf-bad{color:var(--bad)}.rf-warn{color:var(--warn)}
+.rf-bar{position:sticky;top:0;z-index:50;display:flex;gap:14px;align-items:center;flex-wrap:wrap;
+  background:var(--panel);color:#fff;border-radius:6px;padding:12px 18px;margin-bottom:18px;font-size:.86rem}
+.rf-bar b{color:var(--amber)}
+.rf-bar .rf-btn{margin:0;padding:8px 18px}
+.rf-bar .quiet{background:transparent;color:#fff;border:1px solid rgba(255,255,255,.35)}
 .hide{display:none!important}
 </style>
 </head>
@@ -246,8 +278,561 @@ tbody tr.none td{opacity:.55}
 </div>
 
 <script>
+/* TransitionZero Claude Analytics — build the dashboard data from a harvest file.
+ *
+ * Runs in two places from this one file:
+ *   - inside index.html (inlined by assemble.py), behind the password gate, where the
+ *     "Refresh data" panel calls TZBuild.build(...) and then encrypts the result;
+ *   - under Node, for developers checking a change:  node -e "require('./build.js')..."
+ *
+ * Inputs
+ *   harvest  the tz-harvest-*.json that harvest.js downloaded (schema harvest-v2)
+ *   manual   the five figures with no endpoint, answered in the refresh panel
+ *   roster   { people: { email: {name, dept, title} } } — what Claude does not know
+ *   prev     the data currently published (decrypted), for the history captures
+ *
+ * Nothing here is typed in. Every number traces to one of those inputs, and the harvest
+ * records when it was fetched.
+ */
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else root.TZBuild = factory();
+})(typeof self !== 'undefined' ? self : this, function () {
+  'use strict';
+
+  const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const MONL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
+    'September', 'October', 'November', 'December'];
+  const MODELS = ['Fable', 'Opus', 'Sonnet', 'Haiku'];
+  const TIER = { team_standard: 'Standard', team_tier_1: 'Premium' };
+  const ROLE = { primary_owner: 'Primary Owner', owner: 'Owner', admin: 'Admin', user: 'User' };
+
+  // Skills TransitionZero built and distributes through tz-ai-toolkit. Anything else on
+  // the skills table is Anthropic's or third-party.
+  const TZ_SKILLS = new Set(['pr', 'inbox-triage', 'tz-notion', 'meeting-actions', 'db', 'create-ticket',
+    'create-story', 'pick-up', 'investigate', 'request', 'run-status', 'client-id', 'traffic-analysis',
+    'rc', 'prod-release', 'stage-release', 'pr-check', 'pr-address', 'pr-finalise', 'ticket-finalise',
+    'update-notion-release', 'tz-slides-builder', 'tz-docx-builder', 'tz-prd-drafter', 'tz-vision-reviewer',
+    'tz-external-comms-review', 'tz-jd-drafter', 'tz-vendor-contract-review', 'tz-notion-prd-publisher',
+    'tz-hiring-clone', 'sb-blog-reviewer', 'bump', 'fetch']);
+
+  // Someone needs at least this many days of access before a normalised figure is
+  // meaningful. Without it a two-day-old account tops the charts on a handful of messages.
+  const MIN_DAYS_TO_RANK = 30;
+  const WIN_START = '2026-03-01'; // first month Claude was rolled out
+
+  // Anthropic's own time-saved model: output tile → minutes saved each.
+  const TIME_SAVED = [['prsCreated', 'PRs', 150], ['fileOperations', 'file operations', 1],
+    ['conversations', 'conversations', 4], ['designsCreated', 'designs', 30]];
+
+  /* ── dates, all as YYYY-MM-DD strings in UTC ─────────────────────── */
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const dt = (s) => new Date(s.slice(0, 10) + 'T00:00:00Z');
+  const dayOf = (s) => Number(s.slice(8, 10));
+  const monthOf = (s) => Number(s.slice(5, 7));
+  const yearOf = (s) => Number(s.slice(0, 4));
+  const monthKey = (s) => s.slice(0, 7);
+  const monthLabel = (k) => MON[Number(k.slice(5, 7)) - 1] + ' ' + k.slice(0, 4);
+  const monthEnd = (s) => iso(new Date(Date.UTC(yearOf(s), monthOf(s), 0)));
+  const monthStart = (s) => s.slice(0, 7) + '-01';
+  const nextMonthStart = (s) => iso(new Date(Date.UTC(yearOf(s), monthOf(s), 1)));
+  const daysBetween = (a, b) => Math.round((dt(b) - dt(a)) / 864e5);
+  const nice = (s) => dayOf(s) + ' ' + MONL[monthOf(s) - 1] + ' ' + yearOf(s);
+  const shortDate = (s) => dayOf(s) + ' ' + MON[monthOf(s) - 1];
+  const gbp = (minor) => Math.round((minor || 0)) / 100;
+  const round = (v, p) => { const m = Math.pow(10, p || 0); return Math.round(v * m) / m; };
+  const sum = (arr, f) => arr.reduce((a, x) => a + (f(x) || 0), 0);
+
+  /** Sum a daily {date,value} series into {YYYY-MM: total}. */
+  function byMonth(points) {
+    const out = {};
+    for (const p of points || []) {
+      const k = p.date.slice(0, 7);
+      out[k] = (out[k] || 0) + (p.value || 0);
+    }
+    return out;
+  }
+  const lastValue = (points) => (points && points.length ? points[points.length - 1].value : 0) || 0;
+  const inWindow = (points, start, end) =>
+    sum((points || []).filter((p) => p.date.slice(0, 10) >= start && p.date.slice(0, 10) <= end), (p) => p.value);
+
+  /* ── the roster and manual answers travel inside the published data ── */
+
+  /** Department and title per person, from the published data (any schema). */
+  function rosterFrom(prev) {
+    if (prev && prev.refresh && prev.refresh.roster) return JSON.parse(JSON.stringify(prev.refresh.roster));
+    const people = {};
+    for (const mo of Object.values((prev && prev.months) || {})) {
+      for (const m of mo.members || []) {
+        if (m.email) people[m.email] = { name: m.name, dept: m.dept, title: m.title || '' };
+      }
+    }
+    return { people };
+  }
+
+  /** Last month's answers to the five manual questions, from the published data. */
+  function manualFrom(prev) {
+    if (prev && prev.refresh && prev.refresh.manual) return Object.assign({}, prev.refresh.manual);
+    const c = (prev && prev.snapshot && prev.snapshot.cost) || {};
+    const cc = (prev && prev.snapshot && prev.snapshot.claudeCode) || {};
+    return {
+      subscriptionInvoiceGBP: (c.subscription || {}).amount || 0,
+      subscriptionInvoiceDate: (c.subscription || {}).invoiceDate || '',
+      nextInvoiceProjectedGBP: (c.nextInvoice || {}).projected || 0,
+      codeAcceptRatePct: cc.suggestionAcceptRate != null ? round(cc.suggestionAcceptRate * 100, 1) : 0,
+      codeLinesAccepted: cc.linesOfCodeAccepted || 0,
+    };
+  }
+
+  /** Members in the harvest who are not on the roster yet. */
+  function newPeople(harvest, roster) {
+    const people = (roster && roster.people) || {};
+    return (harvest.members || []).filter((m) => m.email && !people[m.email]);
+  }
+
+  /** Things wrong with a harvest file, or [] if it can be built from. */
+  function validate(h) {
+    const problems = [];
+    if (!h || h.schema !== 'harvest-v2') return ['This is not a v2 harvest file. Use the harvest.js from the source folder.'];
+    if (!h.dataAsOf) problems.push('no "data as of" date (activity/overview did not load)');
+    if (!h.members || !h.members.length) problems.push('no members (the members endpoint did not load)');
+    if (!h.months || !Object.values(h.months).some((m) => m.members && m.members.length)) problems.push('no per-member activity for any month');
+    if (!h.spendLimits || !h.spendLimits.length) problems.push('no per-person spend (the spend-limits endpoint did not load)');
+    if (!h.spend || !h.spend.timeseries || !(h.spend.timeseries.all || []).length) problems.push('no spend series');
+    return problems;
+  }
+
+  /** Page-read tiles that came back empty — shown as a warning, never a blocker. */
+  function pageGaps(h) {
+    const p = (h && h.page) || {};
+    const gaps = [];
+    if (!p.onOverview) gaps.push('harvest.js was not run on the Overview page');
+    for (const [k, label] of [['prsCreated', 'PRs created'], ['designsCreated', 'designs created'], ['fileOperations', 'file operations'],
+      ['conversations', 'conversations'], ['mcpWrites', 'MCP writes']]) {
+      if (!p.outputs || p.outputs[k] == null) gaps.push(label);
+    }
+    if (p.timeSavedHours == null) gaps.push('time saved');
+    if (p.actionsPerPrompt == null) gaps.push('actions per prompt');
+    if (!(p.skills || []).length) gaps.push('skills table');
+    if (!(p.connectors || []).length) gaps.push('connectors table');
+    return gaps;
+  }
+
+  /* ── per-member monthly series ───────────────────────────────────── */
+  const ACT = [['daysActive', 'days_active'], ['chats', 'chat_count'], ['messages', 'message_count'],
+    ['projectsCreated', 'projects_created_count'], ['projectsUsed', 'projects_used_count'],
+    ['prs', 'pull_request_count'], ['codeSessions', 'code_session_count'], ['fileEdits', 'file_edit_count'],
+    ['coworkSessions', 'cowork_session_count'], ['coworkMessages', 'cowork_message_count'],
+    ['artifacts', 'artifacts_created_count'], ['spend', 'estimated_spend_us_dollars']];
+
+  /**
+   * One block per calendar month: every current member, zeros for the inactive.
+   * "Who has stopped using it" is the most actionable view, so inactive rows have to be
+   * present. The in-progress month is trimmed to the last complete day the data covers.
+   */
+  function buildMonths(H, roster, asOf) {
+    const members = H.members.filter((m) => m.email);
+    const people = roster.people || {};
+    const base = (m) => {
+      const r = people[m.email] || {};
+      return {
+        name: r.name || m.name || m.email.split('@')[0], email: m.email,
+        dept: r.dept || 'Unassigned', title: r.title || '',
+        role: ROLE[m.role] || 'User', tier: TIER[m.seatTier] || m.seatTier || '',
+      };
+    };
+    const months = {};
+    for (const key of Object.keys(H.months).sort()) {
+      const blk = H.months[key];
+      const start = blk.start;
+      const end = monthEnd(start) < asOf ? monthEnd(start) : asOf;
+      if (end < start) continue;
+      const act = {};
+      for (const a of blk.members || []) if (a.email) act[a.email] = a;
+      const rows = members.map((m) => {
+        const r = base(m), a = act[m.email] || {};
+        for (const [dst, src] of ACT) r[dst] = a[src] || 0;
+        return r;
+      });
+      if (!rows.some((r) => r.daysActive)) continue;
+      const abbr = MON[monthOf(start) - 1];
+      months[monthLabel(key)] = {
+        period: abbr + ' 1 – ' + abbr + ' ' + dayOf(end),
+        days: dayOf(end),
+        members: rows,
+      };
+    }
+    return months;
+  }
+
+  /** Every person gets their own denominator: days since their account existed. */
+  function buildAllTime(months, H, asOf) {
+    const created = {};
+    for (const m of H.members) if (m.email && m.createdAt) created[m.email] = m.createdAt.slice(0, 10);
+    const people = {};
+    for (const mo of Object.values(months)) {
+      for (const m of mo.members) {
+        const r = people[m.email] || (people[m.email] = { name: m.name, email: m.email, dept: m.dept, title: m.title });
+        for (const f of ['daysActive', 'messages', 'coworkMessages', 'codeSessions']) r[f] = (r[f] || 0) + (m[f] || 0);
+      }
+    }
+    const rows = Object.values(people).map((r) => {
+      const c = created[r.email];
+      if (c) {
+        r.created = c;
+        r.availDays = Math.max(0, daysBetween(c > WIN_START ? c : WIN_START, asOf) + 1);
+      } else { r.created = null; r.availDays = null; }
+      const a = r.availDays;
+      r.pctDaysUsed = a ? round(r.daysActive / a * 100, 1) : null;
+      r.chatPerDay = a ? round(r.messages / a, 2) : null;
+      r.coworkPerDay = a ? round(r.coworkMessages / a, 2) : null;
+      r.codePerDay = a ? round(r.codeSessions / a, 2) : null;
+      r.ranked = !!(a && a >= MIN_DAYS_TO_RANK);
+      return r;
+    });
+    rows.sort((a, b) => (b.pctDaysUsed == null ? -1 : b.pctDaysUsed) - (a.pctDaysUsed == null ? -1 : a.pctDaysUsed));
+    const deptPct = {};
+    for (const r of rows) if (r.pctDaysUsed != null) (deptPct[r.dept] = deptPct[r.dept] || []).push(r.pctDaysUsed);
+    const deptAvg = {}, deptCount = {};
+    for (const [k, v] of Object.entries(deptPct)) { deptAvg[k] = round(sum(v, (x) => x) / v.length, 1); deptCount[k] = v.length; }
+    return {
+      period: 'Mar 1 – ' + MON[monthOf(asOf) - 1] + ' ' + dayOf(asOf) + ' ' + yearOf(asOf),
+      days: daysBetween(WIN_START, asOf) + 1,
+      minDaysToRank: MIN_DAYS_TO_RANK,
+      unranked: rows.filter((r) => !r.ranked).length,
+      noAccount: rows.filter((r) => r.availDays == null).map((r) => r.name),
+      deptPct: deptAvg, deptCount, members: rows,
+    };
+  }
+
+  /* ── spend ────────────────────────────────────────────────────────── */
+
+  /** Actual billed GBP per person for the current usage period, from the spend-limits page. */
+  function buildMetered(H, asOf, fetched, roster) {
+    const rows = (H.spendLimits || []).slice().sort((a, b) => (b.usedMinor || 0) - (a.usedMinor || 0));
+    const tiers = {};
+    for (const s of rows) tiers[s.seatTier] = (tiers[s.seatTier] || 0) + 1;
+    const people = roster.people || {};
+    const top = rows.filter((s) => s.usedMinor).map((s) => {
+      const r = people[s.email] || {};
+      return { email: s.email, spend: gbp(s.usedMinor), name: r.name || s.name || s.email.split('@')[0], title: r.title || '' };
+    });
+    const rowsTotal = round(sum(top, (t) => t.spend), 2);
+    return {
+      period: '1 – ' + dayOf(asOf) + ' ' + MONL[monthOf(asOf) - 1] + ' ' + yearOf(asOf) + ', read ' + nice(fetched),
+      includesPartialDay: false,
+      resets: nice(nextMonthStart(asOf)),
+      currency: 'GBP',
+      total: H.orgSpendLimit && H.orgSpendLimit.usedCreditsMinor != null ? gbp(H.orgSpendLimit.usedCreditsMinor) : rowsTotal,
+      rowsTotal,
+      usersBilled: top.length,
+      usersTotal: rows.length,
+      standardSeats: tiers.team_standard || 0,
+      premiumSeats: tiers.team_tier_1 || 0,
+      top,
+    };
+  }
+
+  /** Metered spend by model family, one window per month, summed from the daily series. */
+  function buildModelSpend(H, asOf, fetched) {
+    const perModel = {};
+    for (const m of ((H.spend || {}).byModelDaily || {}).models || []) perModel[m.model_family] = byMonth(m.data_points);
+    const keys = [...new Set(Object.values(perModel).flatMap((s) => Object.keys(s)))].sort();
+    const windows = keys.map((k) => {
+      const full = monthEnd(k + '-01') <= asOf;
+      const by = {};
+      for (const n of MODELS) by[n] = Math.round((perModel[n] || {})[k] || 0);
+      return {
+        label: yearOf(k + '-01') === yearOf(asOf) ? MONL[monthOf(k + '-01') - 1] : MONL[monthOf(k + '-01') - 1] + ' ' + yearOf(k + '-01'),
+        sub: full ? 'full month' : '1 – ' + dayOf(asOf) + ', read ' + nice(fetched),
+        partial: !full, by,
+      };
+    });
+    const ytd = {};
+    for (const n of MODELS) ytd[n] = Math.round(sum(Object.values(perModel[n] || {}), (x) => x));
+    return {
+      currency: 'USD',
+      source: 'claude.ai/analytics/overview → Spend by model, ' + nice(fetched),
+      windows, yearToDate: ytd,
+      reported: { YTD: '1 January – ' + dayOf(asOf) + ' ' + MONL[monthOf(asOf) - 1] },
+      caveat: 'These are the charges for usage above plan limits, so this shows which models the overspill ran on. ' +
+        'Everyday work inside a seat is free and sits outside these figures.',
+      derivedNote: 'Each month is summed from Claude’s daily spend-by-model series, so every figure is read ' +
+        'directly; nothing is derived from quarter or year-to-date totals.',
+    };
+  }
+
+  function usageByMonth(H, asOf) {
+    const ts = H.spend.timeseries || {};
+    const tot = byMonth(ts.all), code = byMonth(ts.claude_code), cowork = byMonth(ts.cowork), chat = byMonth(ts['claude-ai']);
+    return Object.keys(tot).sort().filter((k) => k + '-01' <= asOf).map((k) => {
+      const t = Math.round(tot[k] || 0), c = Math.round(code[k] || 0), w = Math.round(cowork[k] || 0), h = Math.round(chat[k] || 0);
+      const row = { month: MON[monthOf(k + '-01') - 1], total: t, code: c, cowork: w, chat: h, other: Math.max(0, t - c - w - h) };
+      if (monthEnd(k + '-01') > asOf) { row.partial = true; row.upTo = dayOf(asOf) + ' ' + MONL[monthOf(asOf) - 1]; }
+      return row;
+    });
+  }
+
+  /** Share of spend per user decile, highest first, from the Lorenz curve. */
+  function deciles(conc) {
+    const pts = (((conc || {}).lorenz_points) || []).slice().sort((a, b) => a.cumulative_user_pct - b.cumulative_user_pct);
+    if (pts.length < 11) return null;
+    const cum = pts.map((p) => p.cumulative_spend_pct);
+    const shares = []; for (let i = 0; i < 10; i++) shares.push(round(cum[i + 1] - cum[i], 4));
+    return shares[0] < shares[9] ? shares.reverse() : shares;
+  }
+
+  /** The point-in-time figures worth keeping, so the history table grows into a trend. */
+  function capture(data, capturedAt) {
+    const s = data.snapshot, c = s.cost;
+    const stick = {};
+    for (const x of s.stickiness) stick[x.product] = x.dauMau;
+    const seats = {};
+    for (const k of ['seatsPurchased', 'seatsInUse', 'seatsUnused', 'members', 'invitesPending']) seats[k] = data.meta[k];
+    return {
+      capturedAt, window: s.window, dataAsOf: s.dataAsOf,
+      actionsPerPrompt: s.agentic.actionsPerPrompt,
+      adoptionLevel: s.adoptionLevel, stickiness: stick, outputs: s.outputs,
+      timeSavedHours: s.timeSaved.hours,
+      skillsInUse: (s.skills || []).length, connectorsInUse: (s.connectors || []).length,
+      projectsTotal: s.projectsMeta.totalProjects, projectsShared: s.projectsMeta.sharedProjects,
+      projectsSingleConversation: s.projectsMeta.singleConversation,
+      meteredPeriod: c.metered.period, meteredTotalGBP: c.metered.total,
+      meteredUsersBilled: c.metered.usersBilled, meteredTop: c.metered.top,
+      seats,
+    };
+  }
+
+  /* ── main ─────────────────────────────────────────────────────────── */
+  function build(H, manual, roster, prev, opts) {
+    opts = opts || {};
+    const problems = validate(H);
+    if (problems.length) throw new Error('Cannot build from this harvest: ' + problems.join('; '));
+    manual = manual || {};
+    roster = roster || { people: {} };
+    const today = opts.today || iso(new Date());
+
+    const asOf = H.dataAsOf.slice(0, 10);
+    const fetched = H.fetchedAt.slice(0, 10);
+    const winStart = H.window.start, winEnd = H.window.end;
+    const last30 = (H.last30.members || []).filter((m) => m.email);
+    const counts = (H.seats || {}).counts || {};
+    const purchased = sum(Object.values((H.seats || {}).purchased || {}), (x) => x);
+    const membersTotal = counts.total != null ? counts.total : H.members.length;
+    const pending = counts.pending_invites_total || 0;
+
+    const months = buildMonths(H, roster, asOf);
+    const monthKeys = Object.keys(months);
+    if (!monthKeys.length) throw new Error('No month in the harvest has any activity.');
+    const rosterRows = months[monthKeys[monthKeys.length - 1]].members;
+    const deptTotals = {};
+    for (const m of rosterRows) deptTotals[m.dept] = (deptTotals[m.dept] || 0) + 1;
+
+    const data = {};
+    data.meta = {
+      org: 'TransitionZero',
+      seatsPurchased: purchased,
+      seatsInUse: membersTotal + pending,
+      seatsUnused: Math.max(0, purchased - membersTotal - pending),
+      members: membersTotal,
+      invitesPending: pending,
+      people: rosterRows.length,
+      deptTotals,
+      generated: today,
+      monthlySource: 'claude.ai analytics, member activity by month, fetched ' + nice(fetched),
+      snapshotSource: 'claude.ai analytics JSON endpoints and the rendered Overview page (harvest.js)',
+      schema: 'v6',
+    };
+    data.allTime = buildAllTime(months, H, asOf);
+    data.modelSpend = buildModelSpend(H, asOf, fetched);
+
+    /* ── snapshot: the rolling-30-day view ── */
+    const ov = H.overview || {};
+    const page = H.page || {};
+    const outputs = Object.assign({}, page.outputs || {});
+    if (outputs.prsCreated == null) outputs.prsCreated = sum(last30, (m) => m.pull_request_count);
+    if (outputs.conversations == null) outputs.conversations = sum(last30, (m) => m.chat_count);
+    const assumptions = TIME_SAVED.map(([k, label, mins]) => ({ output: (outputs[k] != null ? outputs[k] : '?') + ' ' + label, minutesEach: mins }));
+
+    const prod = (H.activeUsers || {}).byProduct || {};
+    const dauMau = (p) => { const mau = lastValue((prod[p] || {}).mau); return mau ? round(lastValue((prod[p] || {}).dau) / mau, 2) : 0; };
+    const stickiness = [{ product: 'Claude.ai', dauMau: dauMau('chat') }, { product: 'Claude Code', dauMau: dauMau('claude_code') },
+      { product: 'Cowork', dauMau: dauMau('cowork') }, { product: 'Office Agents', dauMau: dauMau('office_agent') }];
+
+    const projects = (H.projects || []).slice().sort((a, b) => (b.messages || 0) - (a.messages || 0));
+    const createdByMonth = [];
+    for (let i = 0; i < monthOf(asOf); i++) createdByMonth.push([MON[i], 0]);
+    for (const p of projects) if (p.createdAt) { const i = monthOf(p.createdAt) - 1; if (createdByMonth[i]) createdByMonth[i][1]++; }
+    const createdStr = (p) => p.createdAt ? MON[monthOf(p.createdAt) - 1] + ' ' + dayOf(p.createdAt) + ', ' + yearOf(p.createdAt) : '';
+
+    const proj = (H.spend || {}).projection || {}, plist = proj.list || {};
+    const conc = (H.spend || {}).concentration || {}, risk = (H.spend || {}).limitRisk || {};
+    const tsAll = H.spend.timeseries.all || [];
+    const mtdStart = monthStart(asOf);
+    const byModelMtd = {};
+    for (const m of ((H.spend || {}).byModelDaily || {}).models || []) byModelMtd[m.model_family] = round(inWindow(m.data_points, mtdStart, asOf), 2);
+    const byProduct = (page.spendByProductTable && page.spendByProductTable.length) ? page.spendByProductTable :
+      [['claude_code', 'Claude Code'], ['cowork', 'Cowork'], ['claude-ai', 'Claude.ai']].map(([k, lbl]) =>
+        ({ product: lbl, periodToDate: round(inWindow(H.spend.timeseries[k], mtdStart, asOf), 2), projectedEom: null }));
+    const rank = ((H.spend || {}).topMembers30d || {}).users || [];
+
+    const metered = buildMetered(H, asOf, fetched, roster);
+    const usageRows = usageByMonth(H, asOf);
+    const thisRow = usageRows.length ? usageRows[usageRows.length - 1] : { total: 0 };
+    const prevFull = usageRows.slice(0, -1).reverse().find((r) => !r.partial);
+    const top2 = sum(metered.top.slice(0, 2), (t) => t.spend);
+    const top2Pct = metered.total ? Math.round(top2 / metered.total * 100) : 0;
+    const fmtUSD = (n) => '$' + Math.round(n).toLocaleString('en-GB');
+    const fmtGBP = (n) => '£' + Number(n).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const watch = [];
+    if (prevFull) {
+      const ratio = prevFull.total ? thisRow.total / prevFull.total : null;
+      const prevName = MONL[MON.indexOf(prevFull.month)];
+      watch.push({
+        title: MONL[monthOf(asOf) - 1] + ' metered usage is ' +
+          (ratio != null && ratio >= 1.5 ? ratio.toFixed(1) + ' times' : ratio != null && ratio < 0.67 ? 'below' : 'in line with') +
+          ' the whole of ' + prevName,
+        body: fmtUSD(thisRow.total) + ' between 1 and ' + dayOf(asOf) + ' ' + MONL[monthOf(asOf) - 1] + ' against ' + fmtUSD(prevFull.total) +
+          ' for the whole of ' + prevName + ', both in US dollars from the same series. The current period resets on ' + metered.resets + '.',
+      });
+    }
+    if (metered.top.length >= 2) {
+      watch.push({
+        title: 'Two accounts are ' + top2Pct + '% of it',
+        body: 'Of the ' + fmtGBP(metered.total) + ' billed, ' + fmtGBP(metered.top[0].spend) + ' and ' + fmtGBP(metered.top[1].spend) +
+          ' are two people. ' + metered.usersBilled + ' of ' + metered.usersTotal + ' have any metered usage at all, so this is a ' +
+          'small number of heavy workloads rather than a broad rise.',
+      });
+    }
+
+    const credits = H.credits || {}, ar = credits.autoReload || {};
+    const purchasedInMonth = sum((credits.tranches || []).filter((t) => (t.grantedAt || '').slice(0, 10) >= mtdStart &&
+      !String(t.programId || '').startsWith('credit_program')), (t) => t.grantedMinor);
+    const nextCharge = (H.subscription || {}).nextChargeDate;
+    const design = prod.claude_design || {};
+
+    data.snapshot = {
+      fetchedAt: H.fetchedAt,
+      window: shortDate(winStart) + ' – ' + shortDate(winEnd) + ' ' + yearOf(winEnd) + ' (rolling 30 days)',
+      dataAsOf: asOf,
+      source: 'claude.ai/analytics — JSON endpoints + rendered Overview page',
+      headline: {
+        weeklyActive: (ov.wau || {}).value, seats: ov.total_members != null ? ov.total_members : membersTotal,
+        weeklyActiveWoW: ((ov.wau || {}).change_percent || 0) / 100,
+        prsCreated: outputs.prsCreated,
+        coworkSessions: sum(last30, (m) => m.cowork_session_count),
+        totalSpend: Math.round(inWindow(tsAll, winStart, winEnd)),
+      },
+      outputs,
+      timeSaved: { hours: page.timeSavedHours != null ? page.timeSavedHours : null, assumptions },
+      agentic: { actionsPerPrompt: page.actionsPerPrompt != null ? page.actionsPerPrompt : null },
+      adoptionLevel: {
+        allMembers: ov.total_members != null ? ov.total_members : membersTotal,
+        monthly: (ov.mau || {}).value, weekly: (ov.wau || {}).value, daily: (ov.dau || {}).value,
+      },
+      stickiness,
+      skills: (page.skills || []).map((s) => ({ skill: s.skill, uses: s.uses, costPerUse: s.costPerUse, builtBy: TZ_SKILLS.has(s.skill) ? 'TransitionZero' : 'Other' })),
+      connectors: page.connectors || [],
+      fileCategories: {
+        total: (H.fileCategories || {}).total_file_operation_count || 0,
+        asOf: (H.fileCategories || {}).data_as_of || null,
+        categories: ((H.fileCategories || {}).categories || []).map((c) => ({ category: c.category, count: c.file_operation_count, share: c.share })),
+      },
+      topCoworkMembers: last30.filter((m) => m.cowork_session_count).sort((a, b) => b.cowork_session_count - a.cowork_session_count).slice(0, 5)
+        .map((m) => ({ email: m.email, sessions: m.cowork_session_count || 0, messages: m.cowork_message_count || 0 })),
+      projects: projects.slice(0, 5).map((p) => ({ project: p.project, users: p.users, conversations: p.conversations, messages: p.messages })),
+      projectsMeta: {
+        createdInWindow: projects.filter((p) => p.createdAt && p.createdAt.slice(0, 10) >= winStart).length,
+        usersWithOneOrMore: membersTotal ? round(last30.filter((m) => m.projects_used_count).length / membersTotal, 2) : 0,
+        totalProjects: projects.length,
+        totalMessages: sum(projects, (p) => p.messages),
+        sharedProjects: projects.filter((p) => (p.users || 0) > 1).length,
+        distinctCreators: new Set(projects.map((p) => p.createdBy).filter(Boolean)).size,
+        singleConversation: projects.filter((p) => (p.conversations || 0) <= 1).length,
+        createdByMonth,
+        source: 'claude.ai/analytics/usage → Projects, ' + nice(fetched),
+        coworkProjectsExcluded: true,
+        coworkNote: 'These live in the cloud and can be set public or private. Cowork projects are separate: they sit locally on a ' +
+          'person’s desktop and stay private to them, so the real total across TransitionZero is higher.',
+        sharedMeaning: '"Shared" counts projects more than one person has actually opened, which is a stricter test than the public/private setting.',
+      },
+      projectsAll: projects.map((p) => ({ project: p.project, users: p.users, conversations: p.conversations, messages: p.messages, created: createdStr(p), createdBy: p.createdBy || '' })),
+      topProjectUsers: last30.filter((m) => m.projects_used_count).sort((a, b) => b.projects_used_count - a.projects_used_count).slice(0, 5)
+        .map((m) => ({ email: m.email, projectsUsed: m.projects_used_count || 0 })),
+      spend: {
+        mtdActual: plist.mtd_actual_usd != null ? plist.mtd_actual_usd : null,
+        projectedEom: plist.projected_eom_l7_usd != null ? plist.projected_eom_l7_usd : null,
+        currency: 'USD',
+        dailyActuals: plist.mtd_daily_actuals || [],
+        byProduct,
+        byModel: MODELS.map((n) => ({ model: n, spend: byModelMtd[n] || 0 })),
+        topMembers: rank.slice(0, 5).map((u) => ({ email: u.email_address, spend: u.value })),
+        concentration: { gini: conc.gini, top10Share: conc.top10_pct_share, users: conc.total_users, asOf: conc.as_of, deciles: deciles(conc) },
+        limits: { withLimit: risk.total_capped_users, withoutLimit: risk.uncapped_users },
+      },
+      // Two separate charges in two currencies, never added together: the seat subscription
+      // (GBP, from the billing page) and metered usage above plan limits (USD from analytics;
+      // GBP as actually billed on the spend-limits page).
+      cost: {
+        reportedMonth: MONL[monthOf(asOf) - 1] + ' ' + yearOf(asOf),
+        explainer: 'TransitionZero pays a monthly fee for each seat. When someone goes past their plan limit, any further usage ' +
+          'draws on a prepaid credit balance. Those are two separate charges, shown separately below.',
+        subscription: {
+          currency: 'GBP', invoiceDate: manual.subscriptionInvoiceDate || '', amount: Number(manual.subscriptionInvoiceGBP) || 0,
+          members: membersTotal, note: 'The monthly bill for seats. This is the large majority of what Claude costs.',
+        },
+        usage: {
+          currency: 'USD', amount: thisRow.total,
+          note: 'Metered usage from 1 to ' + dayOf(asOf) + ' ' + MONL[monthOf(asOf) - 1] + ', on top of the plan. Drawn from prepaid credits.',
+        },
+        credits: {
+          currency: 'GBP', balance: gbp(credits.balanceMinor), purchasedInMonth: gbp(purchasedInMonth),
+          note: 'Prepaid balance that absorbs usage spikes. Includes credits granted by Anthropic, so it is not all money TransitionZero has spent.',
+          autoReload: ar.enabled ? 'Tops up to £' + Math.round(gbp(ar.reload_to_in_minor_units)) + ' when the balance falls to £' + Math.round(gbp(ar.threshold_in_minor_units)) : 'Auto-reload is off',
+        },
+        nextInvoice: {
+          currency: 'GBP', date: nextCharge ? nice(nextCharge) : '', projected: Number(manual.nextInvoiceProjectedGBP) || 0,
+          seats: purchased, seatsAvailable: Math.max(0, purchased - membersTotal - pending),
+        },
+        usageByMonth: usageRows,
+        metered,
+        watch,
+      },
+      claudeCode: {
+        suggestionAcceptRate: (Number(manual.codeAcceptRatePct) || 0) / 100,
+        linesOfCodeAccepted: Number(manual.codeLinesAccepted) || 0,
+        perUserAvailable: false,
+        blockedReason: 'The per-user pull request and lines-of-code charts show “Data processing in progress”. The Claude Code ' +
+          'GitHub app needs confirming on the TransitionZero repositories before per-engineer detail appears.',
+      },
+      claudeDesign: { dailyActive: lastValue(design.dau), weeklyActive: lastValue(design.wau), monthlyActive: lastValue(design.mau) },
+    };
+    data.months = months;
+
+    // History: everything already captured, plus today's capture. Never edit an existing
+    // capture and never invent one for a missed month; a gap is honest.
+    const history = ((prev && prev.history) || []).slice();
+    if (!history.some((c) => c.capturedAt === today)) history.push(capture(data, today));
+    history.sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+    data.history = history;
+
+    // Carried forward so the next refresh starts from this month's answers.
+    data.refresh = { roster, manual: Object.assign({}, manual, { answeredOn: today }), harvestFetchedAt: H.fetchedAt };
+    return data;
+  }
+
+  return { build, validate, pageGaps, rosterFrom, manualFrom, newPeople, capture, MIN_DAYS_TO_RANK };
+});
+
+</script>
+<script>
 /* ═══ decryption gate ═══════════════════════════════════ */
 const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const b64e = a => { let s=''; for(let i=0;i<a.length;i+=0x8000) s+=String.fromCharCode.apply(null,a.subarray(i,i+0x8000)); return btoa(s); };
+const KDF_ITERATIONS = 250000;
+// The password that opened the page. The refresh panel encrypts with this same value, so a
+// rebuilt data.enc can never be locked with a mistyped password nobody else knows.
+let PW = null;
 async function unlock(pw){
   const res = await fetch('data.enc?v=' + Date.now());
   if(!res.ok) throw new Error('Could not load the data file (HTTP ' + res.status + ')');
@@ -263,6 +848,21 @@ async function unlock(pw){
     plain=await new Response(ds.readable).arrayBuffer();
   }
   return JSON.parse(new TextDecoder().decode(plain));
+}
+/* The mirror image of unlock(): gzip, then PBKDF2-SHA256 → AES-256-GCM with a fresh salt and
+   IV. Produces the same payload shape encrypt.py did, so old and new data.enc files are
+   interchangeable. */
+async function encrypt(pw, obj){
+  const raw = new TextEncoder().encode(JSON.stringify(obj));
+  const cs = new CompressionStream('gzip');
+  const w = cs.writable.getWriter(); w.write(raw); w.close();
+  const gz = new Uint8Array(await new Response(cs.readable).arrayBuffer());
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({name:'PBKDF2', salt, iterations:KDF_ITERATIONS, hash:'SHA-256'},
+    km, {name:'AES-GCM', length:256}, false, ['encrypt']);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, gz));
+  return {v:2, gz:true, kdf:'PBKDF2-SHA256', iterations:KDF_ITERATIONS, salt:b64e(salt), iv:b64e(iv), ct:b64e(ct)};
 }
 const gate=document.getElementById('gate'), pwEl=document.getElementById('pw'),
       goEl=document.getElementById('go'), errEl=document.getElementById('err');
@@ -282,7 +882,7 @@ async function attempt(){
     goEl.disabled=false; goEl.textContent='Unlock'; pwEl.select();
     return;
   }
-  DATA = data;
+  DATA = data; PW = pwEl.value;
   gate.classList.add('hide');
   document.getElementById('page').classList.remove('hide');
   try{ boot(); }catch(e){ showFailure(e); }
@@ -347,6 +947,7 @@ function setView(v){
   ['monthly','usage','cost'].forEach(k=>document.getElementById('v-'+k).classList.toggle('on',k===v));
   document.getElementById('monthPills').style.display = v==='monthly'?'contents':'none';
   render();
+  if(v==='refresh') window.scrollTo(0,0);
 }
 function toggleMode(){
   document.body.classList.toggle('dark');
@@ -372,13 +973,15 @@ function showFailure(e){
 function render(){
   if(!DATA) return;
   try{
-    document.getElementById('app').innerHTML =
-      view==='monthly'?vMonthly(): view==='usage'?vUsage(): vCost();
+    document.getElementById('app').innerHTML = (RF.built ? rfBar() : '') +
+      (view==='monthly'?vMonthly(): view==='usage'?vUsage(): view==='refresh'?vRefresh(): vCost());
     if(view==='monthly') paintRows();
+    if(view==='refresh') rfWire();
     document.getElementById('foot').innerHTML =
       'Monthly figures: '+esc(DATA.meta.monthlySource)+'.<br>'+
       'Usage detail and cost: '+esc(DATA.snapshot.source)+', fetched '+
-      esc(niceDate(DATA.snapshot.fetchedAt.slice(0,10)))+'.';
+      esc(niceDate(DATA.snapshot.fetchedAt.slice(0,10)))+'.<br>'+
+      '<a href="#" onclick="openRefresh();return false">Refresh the data</a> (owners, once a month)';
   }catch(e){ showFailure(e); }
 }
 
@@ -860,8 +1463,11 @@ function fileCats(s){
     f.categories.map((c,i)=>'<span><span class="dot" style="background:'+CAT[i%CAT.length]+'"></span>'+
       esc(c.category)+' · '+fmt(c.count)+' ('+(c.share*100).toFixed(1)+'%)</span>').join('')+'</div>';
 }
+const NOT_READ='<div class="note" style="margin-top:0">Not read at the last refresh. This table only exists on '+
+  'the rendered Overview page, so it is blank when harvest.js was not run there.</div>';
 function skills(s){
   const tz=s.skills.filter(k=>k.builtBy==='TransitionZero').length;
+  if(!s.skills.length) return '<div class="panel" style="margin:0"><div class="p-title">Skills in use</div>'+NOT_READ+'</div>';
   return '<div class="panel" style="margin:0"><div class="p-title">Skills in use'+
     '<span class="p-note">packaged instructions people invoke by name</span></div>'+
     '<div class="tw"><table><thead><tr><th>Skill</th><th class="n">Uses</th><th class="n">Cost each</th>'+
@@ -869,10 +1475,11 @@ function skills(s){
       (k.builtBy==='TransitionZero'?' <span class="tag">TZ built</span>':'')+'</td>'+
       '<td class="n">'+fmt(k.uses)+'</td><td class="n'+(k.costPerUse?'':' z')+'">'+
       (k.costPerUse?'$'+k.costPerUse.toFixed(2):'—')+'</td></tr>').join('')+
-    '</tbody></table></div><div class="note"><b>'+tz+' of the top five are ours.</b> Skills we build '+
+    '</tbody></table></div><div class="note"><b>'+tz+' of the top '+s.skills.length+' are ours.</b> Skills we build '+
     'get used, which is the cheapest lever we have for raising adoption.</div></div>';
 }
 function connectors(s){
+  if(!s.connectors.length) return '<div class="panel" style="margin:0"><div class="p-title">Connectors</div>'+NOT_READ+'</div>';
   const noWrite = s.connectors.filter(c => !c.writes);
   const totR = s.connectors.reduce((a,c)=>a+c.reads,0);
   const totW = s.connectors.reduce((a,c)=>a+c.writes,0);
@@ -934,7 +1541,7 @@ function projects(s){
 function historyPanel(){
   const H=DATA.history||[];
   const rows=[
-    ['Actions per prompt', c=>c.actionsPerPrompt.toFixed(1)],
+    ['Actions per prompt', c=>c.actionsPerPrompt==null?'—':c.actionsPerPrompt.toFixed(1)],
     ['Active this month',  c=>c.adoptionLevel.monthly],
     ['Active yesterday',   c=>c.adoptionLevel.daily],
     ['Conversations',      c=>fmt(c.outputs.conversations)],
@@ -962,6 +1569,10 @@ function historyPanel(){
 
 function agenticPanel(s){
   const a=s.agentic.actionsPerPrompt;
+  if(a==null) return '<div class="panel"><div class="p-title">How agentic the usage is'+
+    '<span class="p-note">rolling 30 days to '+niceDate(s.dataAsOf)+'</span></div>'+
+    '<div class="note" style="margin-top:0">Not read at the last refresh. This figure only exists on '+
+    'the rendered Overview page, so it is blank when harvest.js was not run there.</div></div>';
   return '<div class="panel"><div class="p-title">How agentic the usage is'+
     '<span class="p-note">rolling 30 days to '+niceDate(s.dataAsOf)+'</span></div>'+
     '<div class="k-num cowork" style="font-size:3rem;line-height:1.1">'+a.toFixed(1)+'</div>'+
@@ -981,10 +1592,129 @@ function codePanel(s){
   return '<div class="panel"><div class="p-title">Claude Code</div><div class="cards" style="margin-bottom:0">'+
     card('Suggestion accept rate',(c.suggestionAcceptRate*100).toFixed(1)+'%','Share of suggestions engineers kept','code')+
     card('Lines of code accepted',fmt(c.linesOfCodeAccepted),'Merged into the codebase','code')+
-    card('Actions per prompt',s.agentic.actionsPerPrompt,'Work delegated per instruction','chat')+
+    card('Actions per prompt',s.agentic.actionsPerPrompt==null?'—':s.agentic.actionsPerPrompt,'Work delegated per instruction','chat')+
     '</div>'+(c.perUserAvailable?'':'<div class="note"><b>Per-engineer detail is not available yet.</b> '+
     esc(c.blockedReason)+'</div>')+'</div>';
 }
+
+/* ═══ REFRESH · rebuild data.enc from a harvest file ════
+   Behind the password gate. The build itself is TZBuild (build.js, inlined above);
+   this is only the form around it and the download. */
+const RF={harvest:null, fileName:'', gaps:[], error:null, buildError:null, built:false, prev:null};
+function openRefresh(){ setView('refresh'); }
+function fld(k,label,v,type){
+  return '<div><label>'+esc(label)+'</label><input id="rf-'+k+'" type="'+type+'" step="any" value="'+esc(v==null?'':v)+'"></div>';
+}
+function vRefresh(){
+  const M=TZBuild.manualFrom(DATA), roster=TZBuild.rosterFrom(DATA), h=RF.harvest;
+  const depts=Object.keys(DATA.meta.deptTotals||{}).sort();
+  let html='<div class="panel"><div class="p-title">Refresh the data'+
+    '<span class="p-note">once a month, by an owner · nothing leaves your browser until you upload the file</span></div>';
+  html+='<div class="rf-step"><div class="rf-n">1</div><div class="rf-b"><b>Harvest.</b>'+
+    '<p>On claude.ai open <b>Analytics → Overview</b>, scroll to the bottom and back to the top, paste '+
+    '<b>harvest.js</b> into the console and click the red download button it shows. Then drop that file here.</p>'+
+    '<label class="rf-drop" id="rf-drop">'+
+    (h ? '<span class="rf-ok">✓</span> '+esc(RF.fileName)+' — data to <b>'+esc(niceDate(h.dataAsOf))+'</b> · '+
+         h.members.length+' members · '+Object.keys(h.months).length+' months · '+h.projects.length+
+         ' projects · '+h.spendLimits.length+' spend rows'
+       : 'Drop the tz-harvest file here, or click to choose it')+
+    '<input type="file" id="rf-file" accept=".json,application/json"></label>'+
+    (RF.error?'<p class="rf-bad" style="margin-top:8px">'+esc(RF.error)+'</p>':'')+
+    (h&&RF.gaps.length?'<p class="rf-warn" style="margin-top:8px">Not read off the page: '+esc(RF.gaps.join(', '))+
+      '. Those panels will say so. Re-run harvest.js on the Overview page if you want them.</p>':'')+
+    '</div></div>';
+  if(h){
+    const newP=TZBuild.newPeople(h,roster);
+    html+='<div class="rf-step"><div class="rf-n">2</div><div class="rf-b"><b>Five figures Claude has no endpoint for.</b>'+
+      '<p>Last month\'s answers are filled in — change only what has changed. The first three are on '+
+      '<b>claude.ai → Organization settings → Billing</b>; the last two on <b>Analytics → Claude Code</b>.</p>'+
+      '<div class="rf-form">'+
+      fld('subscriptionInvoiceGBP','Latest seat invoice, £',M.subscriptionInvoiceGBP,'number')+
+      fld('subscriptionInvoiceDate','Date of that invoice',M.subscriptionInvoiceDate,'text')+
+      fld('nextInvoiceProjectedGBP','Next invoice shown, £',M.nextInvoiceProjectedGBP,'number')+
+      fld('codeAcceptRatePct','Suggestion accept rate, %',M.codeAcceptRatePct,'number')+
+      fld('codeLinesAccepted','Lines of code accepted',M.codeLinesAccepted,'number')+
+      '</div></div></div>';
+    html+='<div class="rf-step"><div class="rf-n">3</div><div class="rf-b">'+
+      (newP.length
+        ? '<b>'+newP.length+' new '+(newP.length===1?'person':'people')+'.</b><p>Claude does not know departments or job titles, so fill these in once.</p>'+
+          '<div class="rf-form">'+newP.map(m=>'<div class="rf-person" data-email="'+esc(m.email)+'"><div class="who">'+esc(m.email)+'</div>'+
+            '<div><label>Name</label><input data-k="name" value="'+esc(m.name||'')+'"></div>'+
+            '<div><label>Department</label><select data-k="dept">'+depts.map(d=>'<option>'+esc(d)+'</option>').join('')+
+              '<option value="__new">Other (type below)</option></select>'+
+              '<input data-k="deptNew" placeholder="New department name" style="margin-top:6px"></div>'+
+            '<div><label>Job title</label><input data-k="title"></div></div>').join('')+'</div>'
+        : '<b>Departments and titles.</b><p>Everyone in the harvest is already on the roster. Nothing to do.</p>')+
+      '</div></div>';
+    html+='<div class="rf-step"><div class="rf-n">4</div><div class="rf-b"><b>Build.</b>'+
+      '<p>The page redraws with the new figures so you can check every tab. Nothing is published until you upload the file it gives you.</p>'+
+      '<button class="rf-btn" id="rf-build">Build the new dashboard</button>'+
+      (RF.buildError?'<p class="rf-bad" style="margin-top:8px">'+esc(RF.buildError)+'</p>':'')+'</div></div>';
+  }
+  return html+'</div>';
+}
+function rfWire(){
+  const drop=document.getElementById('rf-drop'), file=document.getElementById('rf-file');
+  if(file) file.addEventListener('change',()=>{ if(file.files[0]) rfFile(file.files[0]); });
+  if(drop){
+    ['dragenter','dragover'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add('over');}));
+    ['dragleave','drop'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove('over');}));
+    drop.addEventListener('drop',ev=>{ const f=ev.dataTransfer.files[0]; if(f) rfFile(f); });
+  }
+  const b=document.getElementById('rf-build'); if(b) b.addEventListener('click',rfBuild);
+}
+async function rfFile(f){
+  RF.error=null; RF.harvest=null; RF.fileName=f.name; RF.buildError=null;
+  try{
+    const h=JSON.parse(await f.text());
+    const p=TZBuild.validate(h); if(p.length) throw new Error(p.join('; '));
+    RF.harvest=h; RF.gaps=TZBuild.pageGaps(h);
+  }catch(e){ RF.error='Could not use '+f.name+': '+(e.message||e); }
+  render();
+}
+function rfBuild(){
+  const val=id=>document.getElementById('rf-'+id).value.trim();
+  const manual={
+    subscriptionInvoiceGBP:Number(val('subscriptionInvoiceGBP')), subscriptionInvoiceDate:val('subscriptionInvoiceDate'),
+    nextInvoiceProjectedGBP:Number(val('nextInvoiceProjectedGBP')), codeAcceptRatePct:Number(val('codeAcceptRatePct')),
+    codeLinesAccepted:Number(val('codeLinesAccepted')) };
+  const roster=TZBuild.rosterFrom(DATA), missing=[];
+  document.querySelectorAll('.rf-person').forEach(p=>{
+    const g=k=>p.querySelector('[data-k="'+k+'"]').value.trim();
+    let dept=g('dept'); if(dept==='__new') dept=g('deptNew');
+    if(!g('name')||!dept) missing.push(p.dataset.email);
+    roster.people[p.dataset.email]={name:g('name'),dept:dept,title:g('title')};
+  });
+  if(missing.length){ RF.buildError='Name and department are needed for: '+missing.join(', '); render(); return; }
+  try{
+    const next=TZBuild.build(RF.harvest,manual,roster,DATA);
+    RF.prev=DATA; RF.built=true; RF.buildError=null;
+    DATA=next; hidden={}; deptFilter='all'; bandFilter=null; term='';
+    boot(); setView('monthly');
+  }catch(e){ RF.buildError='Build failed: '+(e.message||e); render(); }
+}
+function rfBar(){
+  return '<div class="rf-bar"><span>You are looking at the <b>new</b> data, from a harvest to '+
+    esc(niceDate(DATA.snapshot.dataAsOf))+'. Check all three tabs, then:</span>'+
+    '<button class="rf-btn amber" onclick="rfDownload(this)">Download data.enc</button>'+
+    '<button class="rf-btn quiet" onclick="rfDiscard()">Discard and go back</button>'+
+    '<span id="rf-msg"></span></div>';
+}
+async function rfDownload(btn){
+  btn.disabled=true; btn.textContent='Encrypting…';
+  try{
+    const p=await encrypt(PW, DATA);
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(new Blob([JSON.stringify(p)],{type:'application/json'}));
+    a.download='data.enc'; document.body.appendChild(a); a.click(); a.remove();
+    document.getElementById('rf-msg').innerHTML='<b>Saved to Downloads.</b> Upload data.enc at '+
+      'github.com/transition-zero/tzcl-analytics/upload/published — drag it in, click “Commit changes”. '+
+      'The site updates within a couple of minutes.';
+    btn.textContent='Download again';
+  }catch(e){ document.getElementById('rf-msg').textContent='Could not encrypt: '+(e.message||e); btn.textContent='Download data.enc'; }
+  btn.disabled=false;
+}
+function rfDiscard(){ DATA=RF.prev; RF.built=false; RF.harvest=null; RF.prev=null; boot(); setView('monthly'); }
 
 /* ═══ VIEW 3 · COST ═════════════════════════════════════
    Built around the questions a reader actually has, not
