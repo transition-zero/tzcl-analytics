@@ -613,10 +613,25 @@ tbody tr.none td{opacity:.55}
   }
   function mergeByKey(prevRows, newRows, fallbackKey) {
     const keyOf = (r) => (r.key != null ? r.key : (fallbackKey ? fallbackKey(r) : r));
+    const withKey = (r) => (r.key != null ? r : Object.assign({}, r, { key: keyOf(r) }));
     const byKey = {};
-    for (const r of (prevRows || [])) byKey[keyOf(r)] = r;
-    for (const r of (newRows || [])) byKey[keyOf(r)] = r; // the new harvest wins on overlap
+    for (const r of (prevRows || [])) byKey[keyOf(r)] = withKey(r);
+    for (const r of (newRows || [])) byKey[keyOf(r)] = withKey(r); // the new harvest wins on overlap
     return Object.values(byKey).sort((a, b) => String(keyOf(a)).localeCompare(String(keyOf(b))));
+  }
+
+  /** Turns a legacy month label ("Aug", "August", or "August 2025") into the same
+   *  'YYYY-MM' key new rows carry, so an old entry collides with its new replacement
+   *  instead of silently duplicating. Assumes asOf's year when none is given. */
+  function keyFromLabel(label, asOf) {
+    const str = String(label || '').trim();
+    const m = /^(.*?)(?:\s+(\d{4}))?$/.exec(str);
+    const namePart = (m && m[1] || '').trim();
+    const year = (m && m[2]) ? Number(m[2]) : yearOf(asOf);
+    let idx = MONL.indexOf(namePart);
+    if (idx < 0) idx = MON.indexOf(namePart);
+    if (idx < 0) return str;
+    return year + '-' + String(idx + 1).padStart(2, '0');
   }
 
   function build(H, manual, roster, prev, opts) {
@@ -661,7 +676,7 @@ tbody tr.none td{opacity:.55}
     data.allTime = buildAllTime(months, H, asOf);
     data.modelSpend = buildModelSpend(H, asOf, fetched);
     if (prev && prev.modelSpend) {
-      data.modelSpend.windows = mergeByKey(prev.modelSpend.windows, data.modelSpend.windows, (w) => w.label);
+      data.modelSpend.windows = mergeByKey(prev.modelSpend.windows, data.modelSpend.windows, (w) => keyFromLabel(w.label, asOf));
       const ytd = {};
       for (const n of MODELS) ytd[n] = Math.round(sum(data.modelSpend.windows, (w) => w.by[n] || 0));
       data.modelSpend.yearToDate = ytd;
@@ -701,7 +716,7 @@ tbody tr.none td{opacity:.55}
     const usageRows = mergeByKey(
       prev && prev.snapshot && prev.snapshot.cost && prev.snapshot.cost.usageByMonth,
       usageByMonth(H, asOf),
-      (r) => r.month
+      (r) => keyFromLabel(r.month, asOf)
     );
     const thisRow = usageRows.length ? usageRows[usageRows.length - 1] : { total: 0 };
     const prevFull = usageRows.slice(0, -1).reverse().find((r) => !r.partial);
