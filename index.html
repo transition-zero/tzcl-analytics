@@ -543,6 +543,7 @@ tbody tr.none td{opacity:.55}
       const by = {};
       for (const n of MODELS) by[n] = Math.round((perModel[n] || {})[k] || 0);
       return {
+        key: k,
         label: yearOf(k + '-01') === yearOf(asOf) ? MONL[monthOf(k + '-01') - 1] : MONL[monthOf(k + '-01') - 1] + ' ' + yearOf(k + '-01'),
         sub: full ? 'full month' : '1 – ' + dayOf(asOf) + ', read ' + nice(fetched),
         partial: !full, by,
@@ -567,7 +568,7 @@ tbody tr.none td{opacity:.55}
     const tot = byMonth(ts.all), code = byMonth(ts.claude_code), cowork = byMonth(ts.cowork), chat = byMonth(ts['claude-ai']);
     return Object.keys(tot).sort().filter((k) => k + '-01' <= asOf).map((k) => {
       const t = Math.round(tot[k] || 0), c = Math.round(code[k] || 0), w = Math.round(cowork[k] || 0), h = Math.round(chat[k] || 0);
-      const row = { month: MON[monthOf(k + '-01') - 1], total: t, code: c, cowork: w, chat: h, other: Math.max(0, t - c - w - h) };
+      const row = { key: k, month: MON[monthOf(k + '-01') - 1], total: t, code: c, cowork: w, chat: h, other: Math.max(0, t - c - w - h) };
       if (monthEnd(k + '-01') > asOf) { row.partial = true; row.upTo = dayOf(asOf) + ' ' + MONL[monthOf(asOf) - 1]; }
       return row;
     });
@@ -604,6 +605,20 @@ tbody tr.none td{opacity:.55}
   }
 
   /* ── main ─────────────────────────────────────────────────────────── */
+  /* Carry-forward merges: a single harvest only ever covers its own window, so every
+     multi-month series below must be merged with what the previous build already had,
+     the same way data.history already is — otherwise each refresh drops everything before it. */
+  function mergeMonths(prevMonths, newMonths) {
+    return Object.assign({}, prevMonths || {}, newMonths);
+  }
+  function mergeByKey(prevRows, newRows, fallbackKey) {
+    const keyOf = (r) => (r.key != null ? r.key : (fallbackKey ? fallbackKey(r) : r));
+    const byKey = {};
+    for (const r of (prevRows || [])) byKey[keyOf(r)] = r;
+    for (const r of (newRows || [])) byKey[keyOf(r)] = r; // the new harvest wins on overlap
+    return Object.values(byKey).sort((a, b) => String(keyOf(a)).localeCompare(String(keyOf(b))));
+  }
+
   function build(H, manual, roster, prev, opts) {
     opts = opts || {};
     const problems = validate(H);
@@ -621,7 +636,7 @@ tbody tr.none td{opacity:.55}
     const membersTotal = counts.total != null ? counts.total : H.members.length;
     const pending = counts.pending_invites_total || 0;
 
-    const months = buildMonths(H, roster, asOf);
+    const months = mergeMonths(prev && prev.months, buildMonths(H, roster, asOf));
     const monthKeys = Object.keys(months);
     if (!monthKeys.length) throw new Error('No month in the harvest has any activity.');
     const rosterRows = months[monthKeys[monthKeys.length - 1]].members;
@@ -645,6 +660,12 @@ tbody tr.none td{opacity:.55}
     };
     data.allTime = buildAllTime(months, H, asOf);
     data.modelSpend = buildModelSpend(H, asOf, fetched);
+    if (prev && prev.modelSpend) {
+      data.modelSpend.windows = mergeByKey(prev.modelSpend.windows, data.modelSpend.windows, (w) => w.label);
+      const ytd = {};
+      for (const n of MODELS) ytd[n] = Math.round(sum(data.modelSpend.windows, (w) => w.by[n] || 0));
+      data.modelSpend.yearToDate = ytd;
+    }
 
     /* ── snapshot: the rolling-30-day view ── */
     const ov = H.overview || {};
@@ -677,7 +698,11 @@ tbody tr.none td{opacity:.55}
     const rank = ((H.spend || {}).topMembers30d || {}).users || [];
 
     const metered = buildMetered(H, asOf, fetched, roster);
-    const usageRows = usageByMonth(H, asOf);
+    const usageRows = mergeByKey(
+      prev && prev.snapshot && prev.snapshot.cost && prev.snapshot.cost.usageByMonth,
+      usageByMonth(H, asOf),
+      (r) => r.month
+    );
     const thisRow = usageRows.length ? usageRows[usageRows.length - 1] : { total: 0 };
     const prevFull = usageRows.slice(0, -1).reverse().find((r) => !r.partial);
     const top2 = sum(metered.top.slice(0, 2), (t) => t.spend);
