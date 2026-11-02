@@ -1141,7 +1141,7 @@ function spendAllTime(email){
 }
 
 /* ═══ VIEW 0 · RANKINGS ═════════════════════════════════ */
-const W = {chat:1, cowork:3, code:10};
+const W = {chat:1, cowork:4, code:6};
 const METRICS = [
   ['all',    'All products', null],
   ['chat',   'Chat',         'messages'],
@@ -1153,7 +1153,7 @@ const METRICS = [
 /* Depth of use is scored across five categories rather than one number, because
    no single count describes how deeply someone has taken Claude on.
 
-     Volume       weighted activity, chat 1 / Cowork 3 / Code 10
+     Volume       weighted activity, chat 1 / Cowork 4 / Code 6
      Breadth      how many of the five surfaces they touch at all
      Consistency  share of the period they were active
      Output       pull requests, artifacts and file edits
@@ -1164,7 +1164,7 @@ const METRICS = [
    hidden weighting. Spend is deliberately not one of them: it is ranked on its
    own tab, because costing more is not the same as using it more deeply. */
 const DEPTH_CATS = [
-  ['Volume',      m => (m.messages||0) + (m.coworkMessages||0)*3 + (m.codeSessions||0)*10],
+  ['Volume',      m => (m.messages||0) + (m.coworkMessages||0)*4 + (m.codeSessions||0)*6],
   ['Breadth',     m => ['messages','coworkMessages','codeSessions','projectsCreated','prs']
                         .reduce((n,f)=>n+((m[f]||0)>0?1:0),0)],
   ['Consistency', m => m._pct||0],
@@ -1317,8 +1317,8 @@ function vStandings(){
       '<div class="rol">'+esc(m.title||'')+' · '+esc(m.dept||'')+'</div></div>'+
       '<div class="val">'+showVal(m.score)+'</div></div>').join('')+'</div>')+
     (rankMetric==='all'
-      ? '<div class="scoring"><b>Points</b><span>1 per chat message</span><span>3 per Cowork message</span>'+
-        '<span>10 per Claude Code session</span></div>'
+      ? '<div class="scoring"><b>Points</b><span>1 per chat message</span><span>4 per Cowork message</span>'+
+        '<span>6 per Claude Code session</span></div>'
       : rankMetric==='depth'
       ? '<div class="scoring"><b>Depth of use</b>'+
         DEPTH_CATS.map(c=>'<span>'+esc(c[0])+'</span>').join('')+
